@@ -1,0 +1,103 @@
+#include <xtl.h>
+#include <xbox.h>
+#include <math.h>
+
+#ifndef XINPUT_DEVSUBTYPE_TURNTABLE
+#define XINPUT_DEVSUBTYPE_TURNTABLE 0x1B
+#endif
+
+#define PI 3.14159265358979323846f
+
+typedef DWORD (*pfnXInputGetCapabilities)(DWORD dwUserIndex, DWORD dwFlags, XINPUT_CAPABILITIES* pCapabilities);
+typedef DWORD (*pfnXInputGetState)(DWORD dwUserIndex, XINPUT_STATE* pState);
+
+pfnXInputGetCapabilities OriginalXInputGetCapabilities = NULL;
+pfnXInputGetState OriginalXInputGetState = NULL;
+
+float g_lastAngle[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+DWORD HookedXInputGetCapabilities(DWORD dwUserIndex, DWORD dwFlags, XINPUT_CAPABILITIES* pCapabilities) {
+    DWORD result = OriginalXInputGetCapabilities(dwUserIndex, dwFlags, pCapabilities);
+
+    if (result == ERROR_SUCCESS && pCapabilities != NULL) {
+        if (pCapabilities->SubType == XINPUT_DEVSUBTYPE_GAMEPAD) {
+            pCapabilities->SubType = XINPUT_DEVSUBTYPE_TURNTABLE;
+        }
+    }
+    return result;
+}
+
+DWORD HookedXInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
+    DWORD result = OriginalXInputGetState(dwUserIndex, pState);
+
+    if (result == ERROR_SUCCESS && pState != NULL && dwUserIndex < 4) {
+        WORD orig = pState->Gamepad.wButtons;
+        WORD mappedButtons = 0;
+
+        if ((orig & XINPUT_GAMEPAD_LEFT_SHOULDER) || (orig & XINPUT_GAMEPAD_X)) {
+            mappedButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
+        }
+        if (orig & XINPUT_GAMEPAD_A) {
+            mappedButtons |= XINPUT_GAMEPAD_A;
+        }
+        if ((orig & XINPUT_GAMEPAD_RIGHT_SHOULDER) || (orig & XINPUT_GAMEPAD_B)) {
+            mappedButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+        }
+        if (orig & XINPUT_GAMEPAD_Y) {
+            mappedButtons |= XINPUT_GAMEPAD_Y;
+        }
+
+        if (orig & XINPUT_GAMEPAD_START) mappedButtons |= XINPUT_GAMEPAD_START;
+        if (orig & XINPUT_GAMEPAD_BACK)  mappedButtons |= XINPUT_GAMEPAD_BACK;
+
+        pState->Gamepad.wButtons = mappedButtons;
+
+        SHORT crossfaderVal = 0;
+        if (orig & XINPUT_GAMEPAD_DPAD_LEFT) {
+            crossfaderVal = -32768;
+        } else if (orig & XINPUT_GAMEPAD_DPAD_RIGHT) {
+            crossfaderVal = 32767;
+        } else if (abs(pState->Gamepad.sThumbLX) > 8000) {
+            crossfaderVal = pState->Gamepad.sThumbLX;
+        }
+        pState->Gamepad.sThumbLX = crossfaderVal;
+
+        float rx = (float)pState->Gamepad.sThumbRX;
+        float ry = (float)pState->Gamepad.sThumbRY;
+
+        if (sqrtf(rx * rx + ry * ry) > 8000.0f) {
+            float currentAngle = atan2f(ry, rx);
+            float deltaAngle = currentAngle - g_lastAngle[dwUserIndex];
+
+            if (deltaAngle > PI)  deltaAngle -= (2.0f * PI);
+            if (deltaAngle < -PI) deltaAngle += (2.0f * PI);
+
+            pState->Gamepad.sThumbRX = (SHORT)(deltaAngle * 15000.0f);
+            g_lastAngle[dwUserIndex] = currentAngle;
+        } else {
+            pState->Gamepad.sThumbRX = 0;
+        }
+
+        SHORT dialValue = 0;
+        if (pState->Gamepad.bLeftTrigger > 0) {
+            dialValue = -(SHORT)(pState->Gamepad.bLeftTrigger * 128);
+        } else if (pState->Gamepad.bRightTrigger > 0) {
+            dialValue = (SHORT)(pState->Gamepad.bRightTrigger * 128);
+        }
+        pState->Gamepad.sThumbLY = dialValue;
+    }
+
+    return result;
+}
+
+void PatchXInputHooks() {
+    OriginalXInputGetCapabilities = (pfnXInputGetCapabilities)XamGetSystemAddress(401);
+    OriginalXInputGetState = (pfnXInputGetState)XamGetSystemAddress(402);
+}
+
+BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved) {
+    if (dwReason == DLL_PROCESS_ATTACH) {
+        PatchXInputHooks();
+    }
+    return TRUE;
+}
